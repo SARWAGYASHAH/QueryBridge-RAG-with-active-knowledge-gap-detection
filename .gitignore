@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+.env.*
+!.env.example
+chroma_db/
+*.sqlite3
+data/chunks/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+prompt.md
+project.md

@@ -1,0 +1,35 @@
+# QueryBridge — Core Dependencies
+langchain==0.2.16
+langchain-community==0.2.16
+langchain-groq==0.1.9
+pypdf==4.3.1
+unstructured==0.15.7
+markdown==3.6
+
+# Embeddings
+sentence-transformers==3.0.1
+torch==2.3.1
+
+# Vector Store
+chromadb==0.5.5
+
+# LLM Providers
+groq==0.9.0
+
+# Web Search
+tavily-python==0.3.9
+
+# API
+fastapi==0.111.1
+uvicorn==0.30.3
+pydantic==2.8.2
+
+# Dashboard
+streamlit==1.37.0
+
+# Utilities
+python-dotenv==1.0.1
+requests==2.32.3
+
+# Testing
+pytest==8.3.2
