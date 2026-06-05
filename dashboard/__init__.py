@@ -1,0 +1,1 @@
+"""QueryBridge Dashboard module."""
