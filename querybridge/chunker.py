@@ -17,6 +17,12 @@ Each output chunk is a dict:
 Default split parameters:
     - chunk_size:    512 tokens  (approximated as characters for splitter)
     - chunk_overlap:  50 tokens
+
+Duplicate-content guard:
+    After splitting, a deduplication pass removes any chunk whose full text
+    is contained within the text of an immediately adjacent chunk.  This
+    prevents the overlap window from producing near-identical chunks when the
+    overlap-to-size ratio is high.
 """
 
 import logging
@@ -61,6 +67,67 @@ def _build_splitter(chunk_size: int, chunk_overlap: int):
     )
 
 
+def _deduplicate_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove chunks whose text is fully contained in an adjacent chunk.
+
+    When the overlap window is proportionally large, RecursiveCharacterText-
+    Splitter can emit consecutive chunks that are near-identical because the
+    overlap region spans almost the entire chunk body.  This pass drops any
+    chunk whose stripped text is a substring of either its predecessor or its
+    successor, keeping only the longer, more informative version.
+
+    Chunk indices are reassigned after deduplication so they remain
+    contiguous.
+
+    Args:
+        chunks: Ordered list of chunk dicts (all from the same source doc).
+
+    Returns:
+        Deduplicated list with refreshed ``chunk_index`` values in both the
+        top-level key and the nested ``metadata`` dict.
+    """
+    if len(chunks) <= 1:
+        return chunks
+
+    kept: list[dict[str, Any]] = []
+
+    for i, chunk in enumerate(chunks):
+        text = chunk["text"].strip()
+
+        # Check against immediate predecessor
+        if i > 0:
+            prev_text = chunks[i - 1]["text"].strip()
+            if text in prev_text:
+                logger.debug(
+                    "Dropped duplicate chunk at index %d (substring of predecessor)",
+                    chunk["chunk_index"],
+                )
+                continue
+
+        # Check against immediate successor
+        if i < len(chunks) - 1:
+            next_text = chunks[i + 1]["text"].strip()
+            if text in next_text:
+                logger.debug(
+                    "Dropped duplicate chunk at index %d (substring of successor)",
+                    chunk["chunk_index"],
+                )
+                continue
+
+        kept.append(chunk)
+
+    # Reassign chunk indices to keep them contiguous
+    for new_idx, chunk in enumerate(kept):
+        chunk["chunk_index"] = new_idx
+        chunk["metadata"]["chunk_index"] = new_idx
+
+    dropped = len(chunks) - len(kept)
+    if dropped:
+        logger.info("Deduplication removed %d duplicate chunk(s).", dropped)
+
+    return kept
+
+
 def _chunk_single_doc(
     doc: dict[str, Any],
     splitter,
@@ -94,6 +161,8 @@ def _chunk_single_doc(
             }
         )
 
+    # Remove any chunks whose content is duplicated by an adjacent chunk
+    chunks = _deduplicate_chunks(chunks)
     return chunks
 
 
