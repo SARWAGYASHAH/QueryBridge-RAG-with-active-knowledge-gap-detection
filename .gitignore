@@ -9,6 +9,7 @@ build/
 chroma_db/
 *.sqlite3
 data/chunks/
+data/embeddings_cache/
 .vscode/
 .idea/
 .DS_Store
