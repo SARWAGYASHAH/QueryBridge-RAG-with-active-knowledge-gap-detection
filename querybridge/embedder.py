@@ -172,20 +172,52 @@ def embed_texts(
 
     if uncached_texts:
         model = _get_model()
-        try:
-            new_vecs = model.encode(
-                uncached_texts,
-                batch_size=batch_size,
-                show_progress_bar=False,
-                convert_to_numpy=True,
-            )
-        except Exception as exc:
-            raise RuntimeError(f"Model encoding failed: {exc}") from exc
 
-        for idx, vec in zip(uncached_indices, new_vecs):
-            embedding = vec.tolist()
-            embeddings[idx] = embedding
-            cache[_hash_text(texts[idx])] = embedding
+        # Process in explicit batches to cap peak memory usage.
+        # model.encode() builds the full output array in memory; encoding
+        # thousands of texts at once can cause OOM on machines with limited
+        # RAM.  By slicing uncached_texts into chunks of *batch_size*,
+        # converting each batch to Python lists, and deleting the NumPy
+        # array immediately, we keep only one batch worth of vectors in
+        # memory at a time.
+        encoded_count = 0
+        for batch_start in range(0, len(uncached_texts), batch_size):
+            batch_end = min(batch_start + batch_size, len(uncached_texts))
+            batch_texts = uncached_texts[batch_start:batch_end]
+
+            try:
+                batch_vecs = model.encode(
+                    batch_texts,
+                    batch_size=batch_size,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Model encoding failed on batch "
+                    f"[{batch_start}:{batch_end}]: {exc}"
+                ) from exc
+
+            for j, vec in enumerate(batch_vecs):
+                global_j = batch_start + j
+                idx = uncached_indices[global_j]
+                embedding = vec.tolist()
+                embeddings[idx] = embedding
+                cache[_hash_text(texts[idx])] = embedding
+
+            encoded_count += len(batch_texts)
+
+            # Release the NumPy array so memory is freed before the next
+            # batch is allocated.
+            del batch_vecs
+
+            logger.debug(
+                "Encoded batch %d–%d (%d/%d uncached texts).",
+                batch_start,
+                batch_end - 1,
+                encoded_count,
+                len(uncached_texts),
+            )
 
         _save_cache(cache)
 
