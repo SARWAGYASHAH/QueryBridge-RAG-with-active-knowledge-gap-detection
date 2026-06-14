@@ -56,7 +56,10 @@ def _build_splitter(chunk_size: int, chunk_overlap: int):
     Returns:
         A configured RecursiveCharacterTextSplitter instance.
     """
-    from langchain.text_splitter import RecursiveCharacterTextSplitter  # type: ignore
+    try:
+        from langchain.text_splitter import RecursiveCharacterTextSplitter  # type: ignore
+    except ImportError:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
 
     return RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
