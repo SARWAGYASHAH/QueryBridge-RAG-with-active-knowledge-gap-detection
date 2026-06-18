@@ -49,6 +49,15 @@ logger = logging.getLogger(__name__)
 MAX_PENALTY = 0.3
 MIN_CHUNK_LENGTH = 30
 SIMILARITY_SKIP_THRESHOLD = 0.95
+MIN_CONFIDENCE_THRESHOLD = 0.7
+
+# Keywords in explanations that signal a vague / uncertain contradiction
+# (likely a false positive from the LLM being over-cautious).
+_VAGUE_KEYWORDS = [
+    "might", "could", "possibly", "seems", "appears to",
+    "not necessarily", "unclear", "ambiguous", "may",
+    "slightly different", "different perspective", "nuance",
+]
 
 # LLM settings
 _DEFAULT_MODEL = os.getenv("GROQ_MODEL", "llama3-8b-8192")
@@ -133,14 +142,16 @@ def _build_comparison_prompt(chunk_a: str, chunk_b: str) -> str:
     Returns:
         A formatted prompt string.
     """
-    return f"""You are a factual consistency checker. Compare the two text passages below and determine if they contain any contradictory or conflicting claims.
+    return f"""You are a strict factual consistency checker. Compare the two text passages below and determine if they contain any directly contradictory claims.
 
-IMPORTANT RULES:
-- Only flag DIRECT contradictions where one passage states something that conflicts with the other.
+IMPORTANT RULES — read carefully:
+- Only flag DIRECT, clear-cut contradictions (e.g., "X is 100" vs "X is 200").
 - Do NOT flag differences in scope, detail level, or focus as contradictions.
 - Do NOT flag complementary information as contradictions.
-- Do NOT flag passages that discuss different aspects of the same topic as contradictions.
+- Do NOT flag passages that discuss different aspects of the same topic.
+- Do NOT flag differences in wording or emphasis as contradictions.
 - Two passages can both be true even if they emphasize different things.
+- When in doubt, default to "no contradiction".
 
 Passage A:
 \"\"\"{chunk_a}\"\"\"
@@ -151,7 +162,8 @@ Passage B:
 Respond with ONLY valid JSON (no markdown, no explanation outside JSON):
 {{
     "has_contradiction": true or false,
-    "explanation": "brief explanation of the contradiction if found, or 'No contradiction' if none"
+    "confidence": 0.0 to 1.0,
+    "explanation": "specific factual conflict, or 'No contradiction' if none"
 }}"""
 
 
@@ -328,21 +340,50 @@ def detect_contradictions(
         if isinstance(has_contradiction, str):
             has_contradiction = has_contradiction.lower() == "true"
 
-        if has_contradiction:
-            explanation = llm_result.get("explanation", "No details provided")
-            conflicting.append(
-                {
-                    "chunk_a": text_a[:200],
-                    "chunk_b": text_b[:200],
-                    "explanation": explanation,
-                }
+        if not has_contradiction:
+            continue
+
+        explanation = llm_result.get("explanation", "No details provided")
+        confidence = llm_result.get("confidence", 1.0)
+
+        # Coerce confidence to float if LLM returned a string
+        if isinstance(confidence, str):
+            try:
+                confidence = float(confidence)
+            except ValueError:
+                confidence = 0.0
+
+        # Filter false positives: low confidence or vague explanation
+        if confidence < MIN_CONFIDENCE_THRESHOLD:
+            logger.debug(
+                "Skipping low-confidence contradiction (%.2f) "
+                "between chunks %d and %d.",
+                confidence, i, j,
             )
-            logger.info(
-                "Contradiction found between chunks %d and %d: %s",
-                i,
-                j,
-                explanation[:100],
+            continue
+
+        explanation_lower = explanation.lower()
+        if any(kw in explanation_lower for kw in _VAGUE_KEYWORDS):
+            logger.debug(
+                "Skipping vague contradiction between chunks %d "
+                "and %d: %s",
+                i, j, explanation[:80],
             )
+            continue
+
+        conflicting.append(
+            {
+                "chunk_a": text_a[:200],
+                "chunk_b": text_b[:200],
+                "explanation": explanation,
+                "confidence": round(confidence, 2),
+            }
+        )
+        logger.info(
+            "Contradiction found between chunks %d and %d "
+            "(confidence=%.2f): %s",
+            i, j, confidence, explanation[:100],
+        )
 
     penalty = _compute_penalty(len(conflicting), len(pairs))
 
