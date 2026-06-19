@@ -310,14 +310,16 @@ def score_confidence(
     agreement = _compute_source_agreement(chunks)
 
     # Weighted combination minus penalty
-    confidence = (
+    raw_confidence = (
         (similarity * WEIGHT_SIMILARITY)
         + (coverage * WEIGHT_COVERAGE)
         + (agreement * WEIGHT_AGREEMENT)
         - contradiction_penalty
     )
 
-    confidence = round(confidence, 4)
+    # Clamp to valid range — the raw formula can go negative when the
+    # contradiction penalty is large, or exceed 1.0 in edge cases.
+    confidence = round(max(0.0, min(1.0, raw_confidence)), 4)
 
     label, reason = _assign_label(confidence)
 
