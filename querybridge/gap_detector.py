@@ -54,10 +54,37 @@ CRITICAL_CONFIDENCE = 0.2
 # LLM settings
 _DEFAULT_MODEL = os.getenv("GROQ_MODEL", "llama3-8b-8192")
 
+# Minimum retrieval score to consider a chunk partially relevant.
+# Used to guard against misclassifying partial gaps as missing.
+_PARTIAL_RELEVANCE_SCORE = 0.4
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _chunks_have_partial_relevance(
+    chunks: list[dict[str, Any]],
+) -> bool:
+    """Check whether any chunks have relevance scores above the threshold.
+
+    When the LLM reports ``"none"`` coverage but the retriever returned
+    chunks with reasonable similarity scores, the gap is more accurately
+    classified as ``partial`` rather than ``missing``.
+
+    Args:
+        chunks: Retrieved chunk dicts with optional ``score`` fields.
+
+    Returns:
+        True if at least one chunk has a score at or above
+        ``_PARTIAL_RELEVANCE_SCORE``.
+    """
+    for chunk in chunks:
+        score = chunk.get("score")
+        if isinstance(score, (int, float)) and score >= _PARTIAL_RELEVANCE_SCORE:
+            return True
+    return False
 
 
 def _get_llm_client():
@@ -179,15 +206,21 @@ def _call_llm(prompt: str, model: str = _DEFAULT_MODEL) -> dict[str, Any]:
 def _classify_from_llm_response(
     llm_result: dict[str, Any],
     contradiction_penalty: float,
+    chunks: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
     """Derive gap type and missing info from the LLM response.
 
     Combines the LLM's coverage assessment with contradiction data
-    to produce the final gap classification.
+    to produce the final gap classification.  Includes a guard
+    against misclassifying ``partial`` as ``missing`` when retrieved
+    chunks have reasonable similarity scores.
 
     Args:
         llm_result: Parsed JSON from the LLM gap analysis.
         contradiction_penalty: Penalty from the contradiction detector.
+        chunks: Optional list of retrieved chunk dicts.  When provided,
+            used to guard against over-aggressive ``missing``
+            classification.
 
     Returns:
         Tuple of ``(gap_type, missing_info)``.
@@ -213,6 +246,15 @@ def _classify_from_llm_response(
         return "partial", missing_aspects
 
     # coverage == "none" or unrecognised value
+    # Guard: if chunks exist with reasonable scores, the retriever
+    # DID find related content — classify as partial, not missing.
+    if chunks and _chunks_have_partial_relevance(chunks):
+        logger.info(
+            "LLM reported 'none' coverage but chunks have relevant "
+            "scores — reclassifying as 'partial'."
+        )
+        return "partial", missing_aspects
+
     return "missing", missing_aspects
 
 
@@ -408,7 +450,7 @@ def detect_gap(
         prompt = _build_gap_analysis_prompt(query, chunks)
         llm_result = _call_llm(prompt, model=model)
         gap_type, missing_info = _classify_from_llm_response(
-            llm_result, contradiction_penalty
+            llm_result, contradiction_penalty, chunks=chunks
         )
     except RuntimeError:
         logger.warning(

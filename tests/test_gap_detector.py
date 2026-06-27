@@ -23,6 +23,7 @@ from querybridge.gap_detector import (
     HIGH_CONFIDENCE,
     LOW_CONFIDENCE,
     SEVERE_PENALTY,
+    _chunks_have_partial_relevance,
     _classify_from_llm_response,
     _classify_rule_based,
     _determine_action,
@@ -250,12 +251,45 @@ class TestClassifyFromLLMResponse:
         assert gap_type == "partial"
         assert "Training details" in missing
 
-    def test_no_coverage_returns_missing(self) -> None:
+    def test_no_coverage_no_chunks_returns_missing(self) -> None:
+        """LLM reports none + no chunks → truly missing."""
         gap_type, _ = _classify_from_llm_response(
             {"coverage": "none", "missing_aspects": "Everything is missing."},
             contradiction_penalty=0.0,
+            chunks=None,
         )
         assert gap_type == "missing"
+
+    def test_no_coverage_low_score_chunks_returns_missing(self) -> None:
+        """LLM reports none + chunks with low scores → still missing."""
+        low_score_chunks = [
+            {"text": "Irrelevant content", "score": 0.2, "source": "a.pdf"},
+        ]
+        gap_type, _ = _classify_from_llm_response(
+            {"coverage": "none", "missing_aspects": "Everything is missing."},
+            contradiction_penalty=0.0,
+            chunks=low_score_chunks,
+        )
+        assert gap_type == "missing"
+
+    def test_no_coverage_with_relevant_chunks_returns_partial(self) -> None:
+        """Regression: LLM says 'none' but chunks have decent scores.
+
+        This is the key misclassification fix — when the retriever
+        found passages with reasonable similarity, the gap should be
+        'partial' (some related content found) not 'missing' (nothing
+        found at all).
+        """
+        relevant_chunks = _make_chunks(n=3, score=0.65)
+        gap_type, _ = _classify_from_llm_response(
+            {"coverage": "none", "missing_aspects": "Topic not found."},
+            contradiction_penalty=0.0,
+            chunks=relevant_chunks,
+        )
+        assert gap_type == "partial", (
+            f"Expected 'partial' when chunks have relevant scores, "
+            f"got '{gap_type}'. This is the partial-vs-missing fix."
+        )
 
     def test_severe_contradiction_overrides_coverage(self) -> None:
         """Even with full coverage, severe contradictions → contradictory."""
