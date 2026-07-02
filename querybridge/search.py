@@ -25,6 +25,7 @@ Rate-limit handling:
 import json
 import logging
 import os
+import time
 from typing import Any
 
 import requests
@@ -43,6 +44,85 @@ _TAVILY_URL = "https://api.tavily.com/search"
 
 _DEFAULT_NUM_RESULTS = 5
 _REQUEST_TIMEOUT = 15  # seconds
+
+# Retry configuration for transient failures.
+_MAX_RETRIES = 2
+_INITIAL_BACKOFF = 1.0  # seconds — doubles on each retry
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503}
+
+
+# ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
+
+
+def _retry_with_backoff(
+    request_fn,
+    provider_name: str,
+) -> "requests.Response":
+    """Execute *request_fn* with retries on transient HTTP errors.
+
+    Uses exponential backoff (1 s → 2 s) and honours the ``Retry-After``
+    header when the server provides one.
+
+    Args:
+        request_fn: A zero-argument callable that returns a
+            ``requests.Response``.
+        provider_name: Human-readable name used in log messages
+            (e.g. ``"Serper"``, ``"Tavily"``).
+
+    Returns:
+        The successful ``requests.Response``.
+
+    Raises:
+        RuntimeError: If all retries are exhausted or a non-transient
+            error is encountered.
+    """
+    backoff = _INITIAL_BACKOFF
+    last_exc: Exception | None = None
+
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            response = request_fn()
+        except requests.RequestException as exc:
+            last_exc = exc
+            logger.warning(
+                "%s request error (attempt %d/%d): %s",
+                provider_name, attempt + 1, _MAX_RETRIES + 1, exc,
+            )
+            if attempt < _MAX_RETRIES:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            raise RuntimeError(
+                f"{provider_name} request failed after "
+                f"{_MAX_RETRIES + 1} attempts: {exc}"
+            ) from exc
+
+        if response.status_code not in _TRANSIENT_STATUS_CODES:
+            return response
+
+        # Transient error — honour Retry-After if provided.
+        retry_after = response.headers.get("Retry-After")
+        wait = float(retry_after) if retry_after else backoff
+        logger.warning(
+            "%s returned HTTP %d (attempt %d/%d). "
+            "Retrying in %.1f s.",
+            provider_name, response.status_code,
+            attempt + 1, _MAX_RETRIES + 1, wait,
+        )
+
+        if attempt < _MAX_RETRIES:
+            time.sleep(wait)
+            backoff *= 2
+        else:
+            raise RuntimeError(
+                f"{provider_name} rate limit (HTTP {response.status_code}) "
+                f"persisted after {_MAX_RETRIES + 1} attempts."
+            )
+
+    # Should never reach here, but satisfy the type checker.
+    raise RuntimeError(f"{provider_name} request failed.")  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -84,20 +164,15 @@ def _search_serper(
 
     logger.info("Searching Serper: '%s' (num=%d).", query[:80], num_results)
 
-    try:
-        response = requests.post(
+    def _do_request():
+        return requests.post(
             _SERPER_URL,
             headers=headers,
             json=payload,
             timeout=_REQUEST_TIMEOUT,
         )
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Serper request failed: {exc}") from exc
 
-    if response.status_code == 429:
-        raise RuntimeError(
-            "Serper rate limit hit (HTTP 429). Switching to fallback."
-        )
+    response = _retry_with_backoff(_do_request, "Serper")
 
     if response.status_code != 200:
         raise RuntimeError(
@@ -181,19 +256,14 @@ def _search_tavily(
         query[:80], num_results,
     )
 
-    try:
-        response = requests.post(
+    def _do_request():
+        return requests.post(
             _TAVILY_URL,
             json=payload,
             timeout=_REQUEST_TIMEOUT,
         )
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Tavily request failed: {exc}") from exc
 
-    if response.status_code == 429:
-        raise RuntimeError(
-            "Tavily rate limit hit (HTTP 429). Both providers exhausted."
-        )
+    response = _retry_with_backoff(_do_request, "Tavily")
 
     if response.status_code != 200:
         raise RuntimeError(
